@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Book an appointment</title>
+<style>
+  :root { --bg:#f6f8f7; --card:#fff; --ink:#16231f; --muted:#5d6b66; --line:#dbe3df; --accent:#0f766e; --accent-ink:#fff; --bad:#b42318; --bad-bg:#fef0ee; --ok-bg:#e8f6f1; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0e1513; --card:#16201d; --ink:#e7efeb; --muted:#9aaba4; --line:#26342f; --accent:#2dd4bf; --accent-ink:#04201c; --bad:#ff8a7a; --bad-bg:#2b1613; --ok-bg:#12302a; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.6rem; margin:8px 0 4px; }
+  h2 { font-size:1.1rem; margin:0 0 12px; }
+  p.lead { color:var(--muted); margin:0 0 24px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .slot { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:12px 0; border-top:1px solid var(--line); }
+  .slot:first-of-type { border-top:0; }
+  .slot b { display:block; }
+  .slot span { color:var(--muted); font-size:.9rem; }
+  label { display:block; font-size:.9rem; margin:12px 0 4px; }
+  input, select { width:100%; font:inherit; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); }
+  select { width:auto; }
+  button { font:inherit; padding:9px 16px; border-radius:8px; border:1px solid var(--accent); background:var(--accent); color:var(--accent-ink); cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); }
+  button.danger { background:transparent; color:var(--bad); border-color:var(--bad); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .msg { padding:10px 12px; border-radius:8px; margin-top:12px; }
+  .msg.error { background:var(--bad-bg); color:var(--bad); }
+  .msg.ok { background:var(--ok-bg); }
+  .tag { font-size:.8rem; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .tag.confirmed { color:var(--accent); border-color:var(--accent); }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 16px; margin:12px 0; }
+  dt { color:var(--muted); } dd { margin:0; word-break:break-all; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Book an appointment</h1>
+  <p class="lead">Pick a free slot, tell us who you are, and you're booked.</p>
+
+  <section id="confirmation" hidden aria-live="polite">
+    <h2>Booking confirmed</h2>
+    <dl id="confirmation-details"></dl>
+    <div class="row"><button id="dismiss" class="ghost">Done</button></div>
+    <div id="confirmation-msg"></div>
+  </section>
+
+  <section>
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Available slots</h2>
+      <label style="margin:0">Provider <select id="provider"><option value="">All</option></select></label>
+    </div>
+    <div id="slots" aria-live="polite">Loading…</div>
+  </section>
+
+  <section id="book-form-wrap" hidden>
+    <h2>Book <span id="chosen"></span></h2>
+    <form id="book-form" novalidate>
+      <label for="name">Full name</label>
+      <input id="name" autocomplete="name" required>
+      <label for="email">Email</label>
+      <input id="email" type="email" autocomplete="email" required>
+      <div class="row" style="margin-top:16px"><button type="submit" id="submit">Confirm booking</button><button type="button" id="cancel-form" class="ghost">Back</button></div>
+      <div id="form-msg"></div>
+    </form>
+  </section>
+
+
+  <section>
+    <h2>Look up by booking id</h2>
+    <form id="lookup-form" class="row" novalidate>
+      <input id="lookup-id" placeholder="Booking id" aria-label="Booking id" style="flex:1;min-width:200px">
+      <button type="submit">Look up</button>
+    </form>
+    <div id="lookup-result"></div>
+  </section>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
