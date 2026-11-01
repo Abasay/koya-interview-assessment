@@ -1,3 +1,4 @@
+import express from 'express';
 import { createApp } from './create-app.ts';
 import { createDb } from './db.ts';
 import * as dotenv from 'dotenv';
@@ -14,7 +15,9 @@ if (!process.env.DATABASE_URL) {
 
 const db = await createDb(process.env.DATABASE_URL);
 
-const app = createApp({ db, apiKey });
+// Vercel only accepts an entry file that imports express itself, so the app is mounted here.
+const app = express();
+app.use(createApp({ db, apiKey }));
 
 // On Vercel the platform calls the exported app itself; everywhere else we listen on a port.
 if (!process.env.VERCEL) {
