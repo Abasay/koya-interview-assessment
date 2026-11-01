@@ -106,13 +106,16 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
     if (!slot) return fail(res, 404, 'slot not found');
     if (new Date(slot.start_at).getTime() <= Date.now()) return fail(res, 400, 'slot has already started');
 
+    // The unique index decides the winner when requests race: the loser's insert does nothing.
     const { rows } = await db.query(
       `insert into bookings (id, slot_id, name, email, status)
        values ($1, $2, $3, $4, 'confirmed')
+       on conflict (slot_id) where status = 'confirmed' do nothing
        returning id, slot_id, name, email, status, created_at`,
       [crypto.randomUUID(), slotId, name, email],
     );
-    res.status(201).json(present(rows[0]!));
+    if (!rows[0]) return fail(res, 409, 'slot is already booked');
+    res.status(201).json(present(rows[0]));
   });
 
   api.get('/bookings/:id', async (req, res) => {
@@ -121,6 +124,24 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
     ]);
     if (!rows[0]) return fail(res, 404, 'booking not found');
     res.json(present(rows[0]));
+  });
+
+  // Cancelling keeps the record (status "cancelled") and frees the slot for someone else.
+  api.delete('/bookings/:id', async (req, res) => {
+    const out = await db.tx<{ status: number; body: unknown }>(async (q) => {
+      const { rows } = await q(
+        'select id, slot_id, name, email, status, created_at from bookings where id = $1 for update',
+        [req.params.id],
+      );
+      if (!rows[0]) return { status: 404, body: { error: 'booking not found' } };
+      if (rows[0].status === 'cancelled') return { status: 409, body: { error: 'booking is already cancelled' } };
+      const updated = await q(
+        "update bookings set status = 'cancelled' where id = $1 returning id, slot_id, name, email, status, created_at",
+        [req.params.id],
+      );
+      return { status: 200, body: present(updated.rows[0]!) };
+    });
+    res.status(out.status).json(out.body);
   });
 
   api.use((req: Request, res: Response) => fail(res, 404, 'not found'));

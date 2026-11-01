@@ -19,6 +19,9 @@ create table if not exists bookings (
   status     text not null,
   created_at timestamptz not null default now()
 );
+-- The double-booking guarantee: the database itself refuses a second confirmed booking for a slot,
+-- however many requests arrive at once. Cancelling flips status, which frees the slot again.
+create unique index if not exists one_confirmed_per_slot on bookings (slot_id) where status = 'confirmed';
 create index if not exists bookings_by_email on bookings (email, seq);
 `;
 

@@ -130,3 +130,46 @@ test("level 2: the web page reaches the API without a key, but cannot reset", as
   assert.equal(page.status, 200);
   assert.match(await page.text(), /<html/i);
 });
+
+test("level 3: a second booking for the same slot is 409", async () => {
+  assert.equal((await book()).status, 201);
+  const second = await book({ email: "other@example.com" });
+  assert.equal(second.status, 409);
+  assert.ok(second.json.error);
+  const { rows } = await db.query("select count(*)::int as n from bookings where slot_id = 's1'");
+  assert.equal(rows[0]!.n, 1);
+});
+
+test("level 3: different slots don't block each other", async () => {
+  assert.equal((await book({ slot_id: "s1" })).status, 201);
+  assert.equal((await book({ slot_id: "s2" })).status, 201);
+});
+
+test("level 3: simultaneous requests produce exactly one booking", async () => {
+  const results = await Promise.all(Array.from({ length: 30 }, (_, i) => book({ email: `p${i}@example.com` })));
+  const codes = results.map((r) => r.status);
+  assert.equal(codes.filter((c) => c === 201).length, 1);
+  assert.equal(codes.filter((c) => c === 409).length, 29);
+  const { rows } = await db.query("select count(*)::int as n from bookings where slot_id = 's1' and status = 'confirmed'");
+  assert.equal(rows[0]!.n, 1);
+});
+
+test("level 3: cancelling returns the booking, frees the slot and can't be repeated", async () => {
+  const a = await book();
+  const del = await call("DELETE", `/bookings/${a.json.id}`);
+  assert.equal(del.status, 200);
+  assert.equal(del.json.status, "cancelled");
+  assert.equal(del.json.id, a.json.id);
+  assert.equal((await call("GET", `/bookings/${a.json.id}`)).json.status, "cancelled");
+  assert.equal((await call("DELETE", `/bookings/${a.json.id}`)).status, 409);
+  assert.equal((await call("DELETE", "/bookings/nope")).status, 404);
+  assert.equal((await call("GET", "/slots")).json.slots.find((s: { id: string }) => s.id === "s1").available, true);
+  const rebook = await book({ email: "other@example.com" });
+  assert.equal(rebook.status, 201);
+  assert.notEqual(rebook.json.id, a.json.id);
+});
+
+test("level 3: cancelling needs the key", async () => {
+  const a = await book();
+  assert.equal((await call("DELETE", `/bookings/${a.json.id}`, { key: null })).status, 401);
+});

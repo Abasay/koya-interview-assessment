@@ -30,6 +30,7 @@ const show = (el: HTMLElement, text: string, kind: "error" | "ok" = "error") => 
 
 let slots: Slot[] = [];
 let chosen: Slot | null = null;
+let current: Booking | null = null;
 
 async function loadSlots() {
   try {
@@ -85,7 +86,9 @@ $<HTMLFormElement>("book-form").onsubmit = async (e) => {
     $<HTMLFormElement>("book-form").reset();
     showConfirmation(b);
   } catch (err) {
-    show($("form-msg"), (err as Error).message);
+    const status = (err as ApiError).status;
+    show($("form-msg"), status === 409 ? "Sorry, that slot was just taken. Please pick another." : (err as Error).message);
+    if (status === 409) loadSlots();
   } finally {
     submit.disabled = false;
   }
@@ -99,12 +102,24 @@ function detailsHtml(b: Booking) {
 }
 
 function showConfirmation(b: Booking) {
+  current = b;
   $("confirmation-details").innerHTML = detailsHtml(b);
+  $("cancel-booking").hidden = b.status !== "confirmed";
+  show($("confirmation-msg"), "");
   $("confirmation").hidden = false;
   $("confirmation").scrollIntoView({ behavior: "smooth" });
   loadSlots();
 }
 $("dismiss").onclick = () => { $("confirmation").hidden = true; };
+$("cancel-booking").onclick = async () => {
+  if (!current || !confirm("Cancel this booking?")) return;
+  try {
+    showConfirmation(await api<Booking>("DELETE", `/bookings/${encodeURIComponent(current.id)}`));
+    show($("confirmation-msg"), "Booking cancelled.", "ok");
+  } catch (e) {
+    show($("confirmation-msg"), (e as Error).message);
+  }
+};
 
 $("lookup-form").onsubmit = async (e) => {
   e.preventDefault();
