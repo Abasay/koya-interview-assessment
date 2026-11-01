@@ -10,10 +10,10 @@ const when = (s: string) => fmt.format(new Date(s));
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const esc = (s: unknown) => String(s).replace(/[&<>"']/g, (c) => ENTITIES[c]!);
 
-async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function api<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
   const res = await fetch(API + path, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : {},
+    headers: { ...(body ? { "Content-Type": "application/json" } : {}), ...headers },
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
@@ -31,6 +31,7 @@ const show = (el: HTMLElement, text: string, kind: "error" | "ok" = "error") => 
 let slots: Slot[] = [];
 let chosen: Slot | null = null;
 let current: Booking | null = null;
+let idemKey = "";
 
 async function loadSlots() {
   try {
@@ -64,6 +65,7 @@ $("slots").onclick = (e) => {
   if (!id) return;
   chosen = slots.find((s) => s.id === id) ?? null;
   if (!chosen) return;
+  idemKey = crypto.randomUUID(); // one key per form opening: a double-click or retry cannot book twice
   $("chosen").textContent = `${when(chosen.start)} with ${chosen.provider}`;
   show($("form-msg"), "");
   $("book-form-wrap").hidden = false;
@@ -81,7 +83,7 @@ $<HTMLFormElement>("book-form").onsubmit = async (e) => {
   const submit = $<HTMLButtonElement>("submit");
   submit.disabled = true;
   try {
-    const b = await api<Booking>("POST", "/bookings", { slot_id: chosen.id, name, email });
+    const b = await api<Booking>("POST", "/bookings", { slot_id: chosen.id, name, email }, { "Idempotency-Key": idemKey });
     $("book-form-wrap").hidden = true;
     $<HTMLFormElement>("book-form").reset();
     showConfirmation(b);
@@ -132,5 +134,33 @@ $("lookup-form").onsubmit = async (e) => {
     show($("lookup-result"), (err as ApiError).status === 404 ? "No booking with that id." : (err as Error).message);
   }
 };
+
+let findEmail = "";
+let cursor: string | null = null;
+async function findBookings(more: boolean) {
+  const email = more ? findEmail : $<HTMLInputElement>("find-email").value.trim();
+  if (!email) return show($("find-results"), "Enter your email.");
+  if (!more) {
+    findEmail = email;
+    cursor = null;
+    $("find-results").innerHTML = "";
+  }
+  try {
+    const r = await api<{ bookings: Booking[]; next_cursor: string | null }>(
+      "GET", `/bookings?email=${encodeURIComponent(email)}&limit=5${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    const rows = r.bookings.map((b) => {
+      const s = slots.find((x) => x.id === b.slot_id);
+      return `<div class="slot"><div><b>${s ? esc(when(s.start)) : esc(b.slot_id)}</b><span>${s ? esc(s.provider) + " · " : ""}${esc(b.id)}</span></div><span class="tag ${esc(b.status)}">${esc(b.status)}</span></div>`;
+    }).join("");
+    if (more) $("find-results").insertAdjacentHTML("beforeend", rows);
+    else $("find-results").innerHTML = rows || `<div class="msg ok">No bookings found for ${esc(email)}.</div>`;
+    cursor = r.next_cursor;
+    $("more").hidden = !cursor;
+  } catch (e) {
+    show($("find-results"), (e as Error).message);
+  }
+}
+$("find-form").onsubmit = (e) => { e.preventDefault(); findBookings(false); };
+$("more").onclick = () => findBookings(true);
 
 loadSlots();

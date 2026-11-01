@@ -20,6 +20,21 @@ const present = (row: Row) => ({
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+interface Outcome {
+  status: number;
+  body: unknown;
+}
+
+const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
+
+// Same text whatever order the keys arrive in, so a retry that re-serialises the JSON still matches.
+const canonical = (body: Record<string, unknown>) =>
+  JSON.stringify(
+    Object.keys(body)
+      .sort()
+      .map((k) => [k, body[k]]),
+  );
+
 // Compare hashes so the check takes the same time wherever the keys differ.
 function safeEqual(a: string, b: string) {
   const ha = crypto.createHash('sha256').update(String(a)).digest();
@@ -55,7 +70,7 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
       seen.add(s.id);
     }
     await db.tx(async (q) => {
-      await q('truncate bookings, slots restart identity');
+      await q('truncate bookings, idempotency, slots restart identity');
       for (const s of slots as Record<string, any>[]) {
         await q('insert into slots (id, provider, start, "end", start_at) values ($1,$2,$3,$4,$5)', [
           s.id,
@@ -102,20 +117,86 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
     if (!email) return fail(res, 400, 'email is required');
     if (email.length > 254 || !EMAIL_RE.test(email)) return fail(res, 400, 'email is not valid');
 
-    const slot = (await db.query('select start_at from slots where id = $1', [slotId])).rows[0];
-    if (!slot) return fail(res, 404, 'slot not found');
-    if (new Date(slot.start_at).getTime() <= Date.now()) return fail(res, 400, 'slot has already started');
+    const idemKey = (req.get('idempotency-key') || '').trim();
+    const requestHash = sha(canonical(body));
 
-    // The unique index decides the winner when requests race: the loser's insert does nothing.
+    const out = await db.tx<Outcome>(async (q) => {
+      // Retries: lock on the key so two concurrent retries queue up instead of both booking,
+      // then replay the stored response. The replay comes before every slot check on purpose:
+      // a retry made after the slot started must still return the original 201.
+      if (idemKey) {
+        await q('select pg_advisory_xact_lock(hashtext($1))', ['idem:' + idemKey]);
+        const { rows } = await q('select request_hash, status, body from idempotency where key = $1', [idemKey]);
+        if (rows[0]) {
+          if (rows[0].request_hash !== requestHash) {
+            return { status: 422, body: { error: 'Idempotency-Key was already used with a different request body' } };
+          }
+          return { status: rows[0].status, body: JSON.parse(rows[0].body) };
+        }
+      }
+
+      const slot = (await q('select start_at from slots where id = $1', [slotId])).rows[0];
+      if (!slot) return { status: 404, body: { error: 'slot not found' } };
+      if (new Date(slot.start_at).getTime() <= Date.now()) {
+        return { status: 400, body: { error: 'slot has already started' } };
+      }
+
+      // The unique index decides the winner when requests race: the loser's insert does nothing.
+      const { rows } = await q(
+        `insert into bookings (id, slot_id, name, email, status)
+         values ($1, $2, $3, $4, 'confirmed')
+         on conflict (slot_id) where status = 'confirmed' do nothing
+         returning id, slot_id, name, email, status, created_at`,
+        [crypto.randomUUID(), slotId, name, email],
+      );
+      if (!rows[0]) return { status: 409, body: { error: 'slot is already booked' } };
+
+      // Only successful bookings are remembered; a failed attempt is simply re-evaluated on retry.
+      const result = { status: 201, body: present(rows[0]) };
+      if (idemKey) {
+        await q('insert into idempotency (key, request_hash, status, body) values ($1,$2,$3,$4)', [
+          idemKey,
+          requestHash,
+          result.status,
+          JSON.stringify(result.body),
+        ]);
+      }
+      return result;
+    });
+    res.status(out.status).json(out.body);
+  });
+
+  // A person's bookings, oldest first, one page at a time.
+  api.get('/bookings', async (req, res) => {
+    const email = typeof req.query.email === 'string' ? req.query.email.trim().toLowerCase() : '';
+    if (!email) return fail(res, 400, 'email is required');
+
+    let limit = 10;
+    if (req.query.limit !== undefined) {
+      if (typeof req.query.limit !== 'string' || !/^\d+$/.test(req.query.limit))
+        return fail(res, 400, 'limit must be an integer from 1 to 50');
+      limit = Number(req.query.limit);
+      if (limit < 1 || limit > 50) return fail(res, 400, 'limit must be an integer from 1 to 50');
+    }
+
+    let after = 0;
+    if (req.query.cursor !== undefined) {
+      const decoded = typeof req.query.cursor === 'string' ? Buffer.from(req.query.cursor, 'base64url').toString() : '';
+      if (!/^\d+$/.test(decoded)) return fail(res, 400, 'invalid cursor');
+      after = Number(decoded);
+    }
+
+    // Keyset pagination on the insertion sequence: pages stay stable even if bookings change in between.
+    // We ask for one extra row to know whether there is a next page.
     const { rows } = await db.query(
-      `insert into bookings (id, slot_id, name, email, status)
-       values ($1, $2, $3, $4, 'confirmed')
-       on conflict (slot_id) where status = 'confirmed' do nothing
-       returning id, slot_id, name, email, status, created_at`,
-      [crypto.randomUUID(), slotId, name, email],
+      `select seq, id, slot_id, name, email, status, created_at
+         from bookings where email = $1 and seq > $2 order by seq limit $3`,
+      [email, after, limit + 1],
     );
-    if (!rows[0]) return fail(res, 409, 'slot is already booked');
-    res.status(201).json(present(rows[0]));
+    const page = rows.slice(0, limit);
+    const next_cursor =
+      rows.length > limit ? Buffer.from(String(page[page.length - 1]!.seq)).toString('base64url') : null;
+    res.json({ bookings: page.map(present), next_cursor });
   });
 
   api.get('/bookings/:id', async (req, res) => {
@@ -128,7 +209,7 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
 
   // Cancelling keeps the record (status "cancelled") and frees the slot for someone else.
   api.delete('/bookings/:id', async (req, res) => {
-    const out = await db.tx<{ status: number; body: unknown }>(async (q) => {
+    const out = await db.tx<Outcome>(async (q) => {
       const { rows } = await q(
         'select id, slot_id, name, email, status, created_at from bookings where id = $1 for update',
         [req.params.id],

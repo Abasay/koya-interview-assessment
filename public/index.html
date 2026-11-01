@@ -71,6 +71,16 @@
 
 
   <section>
+    <h2>Find my bookings</h2>
+    <form id="find-form" class="row" novalidate>
+      <input id="find-email" type="email" placeholder="you@example.com" aria-label="Email" style="flex:1;min-width:200px">
+      <button type="submit">Search</button>
+    </form>
+    <div id="find-results"></div>
+    <button id="more" class="ghost" hidden style="margin-top:8px">Load more</button>
+  </section>
+
+  <section>
     <h2>Look up by booking id</h2>
     <form id="lookup-form" class="row" novalidate>
       <input id="lookup-id" placeholder="Booking id" aria-label="Booking id" style="flex:1;min-width:200px">

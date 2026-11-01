@@ -173,3 +173,112 @@ test("level 3: cancelling needs the key", async () => {
   const a = await book();
   assert.equal((await call("DELETE", `/bookings/${a.json.id}`, { key: null })).status, 401);
 });
+
+test("level 4: same key and body replays the same booking, never a second one", async () => {
+  const h = { "Idempotency-Key": "k1" };
+  const first = await book({}, { headers: h });
+  const again = await book({}, { headers: h });
+  assert.equal(first.status, 201);
+  assert.equal(again.status, 201);
+  assert.equal(again.json.id, first.json.id);
+  assert.deepEqual(again.json, first.json);
+  const { rows } = await db.query("select count(*)::int as n from bookings");
+  assert.equal(rows[0]!.n, 1);
+});
+
+test("level 4: same key with a different body is 422 and books nothing", async () => {
+  const h = { "Idempotency-Key": "k2" };
+  assert.equal((await book({}, { headers: h })).status, 201);
+  assert.equal((await book({ name: "Someone Else" }, { headers: h })).status, 422);
+  assert.equal((await book({ slot_id: "s2" }, { headers: h })).status, 422);
+  const { rows } = await db.query("select count(*)::int as n from bookings");
+  assert.equal(rows[0]!.n, 1);
+});
+
+test("level 4: different keys are independent, and no key means no deduplication", async () => {
+  assert.equal((await book({ slot_id: "s1" }, { headers: { "Idempotency-Key": "a" } })).status, 201);
+  assert.equal((await book({ slot_id: "s2" }, { headers: { "Idempotency-Key": "b" } })).status, 201);
+  assert.equal((await book({ slot_id: "s3" })).status, 201);
+  assert.equal((await book({ slot_id: "s3" })).status, 409);
+});
+
+test("level 4: a retry still gets the original answer after the booking was cancelled", async () => {
+  const h = { "Idempotency-Key": "k3" };
+  const first = await book({}, { headers: h });
+  await call("DELETE", `/bookings/${first.json.id}`);
+  const retry = await book({}, { headers: h });
+  assert.equal(retry.status, 201);
+  assert.equal(retry.json.id, first.json.id);
+});
+
+test("level 4: concurrent retries with one key create one booking", async () => {
+  const h = { "Idempotency-Key": "race" };
+  const rs = await Promise.all(Array.from({ length: 5 }, () => book({}, { headers: h })));
+  assert.ok(rs.every((r) => r.status === 201 && r.json.id === rs[0]!.json.id));
+  const { rows } = await db.query("select count(*)::int as n from bookings");
+  assert.equal(rows[0]!.n, 1);
+});
+
+test("level 4: a failed attempt is not remembered, so the retry can succeed", async () => {
+  const h = { "Idempotency-Key": "k4" };
+  assert.equal((await book({ slot_id: "missing" }, { headers: h })).status, 404);
+  const fixed = await book({}, { headers: h }); // same key, corrected body
+  assert.equal(fixed.status, 201);
+  assert.equal((await book({}, { headers: h })).json.id, fixed.json.id);
+});
+
+async function makeFive() {
+  await call("POST", "/reset", {
+    body: { slots: Array.from({ length: 5 }, (_, i) => ({ id: `x${i}`, provider: "P", start: future(10 + i), end: future(10 + i, 10) })) },
+  });
+  const ids: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const r = await book({ slot_id: `x${i}`, email: i % 2 ? "ADA@example.com" : "ada@example.com" });
+    ids.push(r.json.id);
+  }
+  await book({ slot_id: "x0", email: "bob@example.com" }); // 409, and bob has none anyway
+  return ids;
+}
+
+test("level 4: bookings page oldest first, case-insensitive email, last page has a null cursor", async () => {
+  const ids = await makeFive();
+  const seen: string[] = [];
+  let cursor: string | null = null;
+  let pages = 0;
+  do {
+    const r: Awaited<ReturnType<typeof call>> = await call("GET", `/bookings?email=Ada@Example.com&limit=2${cursor ? `&cursor=${cursor}` : ""}`);
+    assert.equal(r.status, 200);
+    assert.ok(r.json.bookings.length <= 2);
+    seen.push(...r.json.bookings.map((b: { id: string }) => b.id));
+    cursor = r.json.next_cursor;
+    pages++;
+  } while (cursor);
+  assert.deepEqual(seen, ids);
+  assert.equal(pages, 3);
+});
+
+test("level 4: default limit is 10, an exact fit has no next page, other people are excluded", async () => {
+  await makeFive();
+  const all = await call("GET", "/bookings?email=ada@example.com");
+  assert.equal(all.json.bookings.length, 5);
+  assert.equal(all.json.next_cursor, null);
+  const exact = await call("GET", "/bookings?email=ada@example.com&limit=5");
+  assert.equal(exact.json.next_cursor, null);
+  assert.deepEqual((await call("GET", "/bookings?email=nobody@example.com")).json, { bookings: [], next_cursor: null });
+  assert.equal((await call("GET", "/bookings?email=bob@example.com")).json.bookings.length, 0);
+});
+
+test("level 4: cancelled bookings still appear in the list", async () => {
+  const ids = await makeFive();
+  await call("DELETE", `/bookings/${ids[0]}`);
+  const r = await call("GET", "/bookings?email=ada@example.com");
+  assert.equal(r.json.bookings[0].status, "cancelled");
+});
+
+test("level 4: bad limit, cursor or email is 400", async () => {
+  for (const q of ["limit=0", "limit=51", "limit=abc", "limit=1.5", "limit=-1", "limit=", "cursor=%25%25%25", "cursor=abc"]) {
+    assert.equal((await call("GET", `/bookings?email=ada@example.com&${q}`)).status, 400, q);
+  }
+  assert.equal((await call("GET", "/bookings")).status, 400);
+  assert.equal((await call("GET", "/bookings?email=ada@example.com", { key: null })).status, 401);
+});
