@@ -2,7 +2,7 @@ interface Slot { id: string; provider: string; start: string; end: string; avail
 interface Booking { id: string; slot_id: string; name: string; email: string; status: "confirmed" | "cancelled"; created_at: string }
 interface ApiError extends Error { status: number }
 
-const API = "";
+const API = "/web";
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
 const timeOnly = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
