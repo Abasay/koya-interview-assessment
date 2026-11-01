@@ -30,6 +30,13 @@ create table if not exists idempotency (
   status       int  not null,
   body         text not null
 );
+-- One row per booking attempt, used to count attempts per email over the last minute.
+create table if not exists attempts (
+  id    bigserial primary key,
+  email text not null,
+  at    timestamptz not null default now()
+);
+create index if not exists attempts_by_email on attempts (email, at);
 `;
 
 export type Row = Record<string, any>;

@@ -18,6 +18,8 @@ const present = (row: Row) => ({
   created_at: iso(row.created_at),
 });
 
+const RATE_LIMIT = 5;
+const RATE_WINDOW_SECONDS = 60;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 interface Outcome {
@@ -70,7 +72,7 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
       seen.add(s.id);
     }
     await db.tx(async (q) => {
-      await q('truncate bookings, idempotency, slots restart identity');
+      await q('truncate bookings, idempotency, attempts, slots restart identity');
       for (const s of slots as Record<string, any>[]) {
         await q('insert into slots (id, provider, start, "end", start_at) values ($1,$2,$3,$4,$5)', [
           s.id,
@@ -103,6 +105,27 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
     res.json({ slots: rows });
   });
 
+  // Sliding window per email: at most 5 attempts in any 60 seconds, failed attempts included.
+  // Returns 0 if the attempt is allowed (and records it), otherwise the whole seconds to wait.
+  // It runs in its own short transaction, so a counted attempt survives a booking that then fails,
+  // and rejected attempts are not recorded, which keeps Retry-After honest.
+  async function takeAttempt(email: string): Promise<number> {
+    return db.tx(async (q) => {
+      await q('select pg_advisory_xact_lock(hashtext($1))', ['rate:' + email]);
+      const { rows } = await q(
+        `select count(*)::int as n,
+                extract(epoch from (min(at) + make_interval(secs => $2) - now())) as wait
+           from attempts where email = $1 and at > now() - make_interval(secs => $2)`,
+        [email, RATE_WINDOW_SECONDS],
+      );
+      const { n, wait } = rows[0]!;
+      if (n >= RATE_LIMIT) return Math.max(1, Math.ceil(Number(wait)));
+      await q('insert into attempts (email) values ($1)', [email]);
+      await q("delete from attempts where at < now() - interval '10 minutes'");
+      return 0;
+    });
+  }
+
   api.post('/bookings', async (req, res) => {
     const body = req.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)) return fail(res, 400, 'body must be a JSON object');
@@ -111,6 +134,16 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
     const slotId = typeof body.slot_id === 'string' ? body.slot_id.trim() : '';
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+
+    // Checked before validation so that spamming bad requests is limited too. Other emails are unaffected.
+    if (email && email.length <= 254) {
+      const wait = await takeAttempt(email);
+      if (wait) {
+        res.set('Retry-After', String(wait));
+        return fail(res, 429, 'too many booking attempts for this email, try again later');
+      }
+    }
+
     if (!slotId) return fail(res, 400, 'slot_id is required');
     if (!name) return fail(res, 400, 'name is required');
     if (name.length > 200) return fail(res, 400, 'name is too long');

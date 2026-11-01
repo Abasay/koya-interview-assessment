@@ -18,7 +18,8 @@ async function api<T>(method: string, path: string, body?: unknown, headers: Rec
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || "Something went wrong") as ApiError;
+    const wait = res.headers.get("Retry-After");
+    const err = new Error(res.status === 429 ? `Too many attempts. Try again in ${wait} seconds.` : data.error || "Something went wrong") as ApiError;
     err.status = res.status;
     throw err;
   }

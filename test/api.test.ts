@@ -97,8 +97,9 @@ test("level 2: missing, empty or invalid details are 400", async () => {
     { email: "" }, { email: undefined }, { email: 5 },
     { email: "not-an-email" }, { email: "a@b" }, { email: "a b@c.com" },
   ];
+  let n = 0;
   for (const over of bad) {
-    const r = await book(over);
+    const r = await book({ email: `v${n++}@example.com`, ...over });
     assert.equal(r.status, 400, JSON.stringify(over));
     assert.ok(r.json.error);
   }
@@ -281,4 +282,50 @@ test("level 4: bad limit, cursor or email is 400", async () => {
   }
   assert.equal((await call("GET", "/bookings")).status, 400);
   assert.equal((await call("GET", "/bookings?email=ada@example.com", { key: null })).status, 401);
+});
+
+test("level 5: the 6th attempt for an email in a minute is 429 with Retry-After", async () => {
+  for (let i = 0; i < 5; i++) {
+    const r = await book({ slot_id: "missing", email: "spam@example.com" });
+    assert.equal(r.status, 404, `attempt ${i + 1} should still be answered normally`);
+  }
+  const blocked = await book({ slot_id: "missing", email: "spam@example.com" });
+  assert.equal(blocked.status, 429);
+  assert.ok(blocked.json.error);
+  const retryAfter = blocked.headers.get("retry-after")!;
+  assert.match(retryAfter, /^\d+$/);
+  assert.ok(Number(retryAfter) >= 1 && Number(retryAfter) <= 60);
+});
+
+test("level 5: failed attempts count, and a good request is blocked once the limit is hit", async () => {
+  for (let i = 0; i < 5; i++) assert.equal((await book({ name: "", email: "spam@example.com" })).status, 400);
+  assert.equal((await book({ email: "spam@example.com" })).status, 429);
+  const { rows } = await db.query("select count(*)::int as n from bookings");
+  assert.equal(rows[0]!.n, 0);
+});
+
+test("level 5: other emails are not affected, and case and spaces don't dodge the limit", async () => {
+  for (let i = 0; i < 5; i++) await book({ slot_id: "missing", email: "spam@example.com" });
+  assert.equal((await book({ slot_id: "missing", email: "  SPAM@Example.com " })).status, 429);
+  assert.equal((await book({ email: "fine@example.com" })).status, 201);
+});
+
+test("level 5: exactly 5 simultaneous attempts pass, the rest get 429", async () => {
+  const rs = await Promise.all(Array.from({ length: 12 }, () => book({ slot_id: "missing", email: "burst@example.com" })));
+  assert.equal(rs.filter((r) => r.status === 404).length, 5);
+  assert.equal(rs.filter((r) => r.status === 429).length, 7);
+});
+
+test("level 5: attempts older than a minute stop counting", async () => {
+  for (let i = 0; i < 5; i++) await book({ slot_id: "missing", email: "old@example.com" });
+  assert.equal((await book({ slot_id: "missing", email: "old@example.com" })).status, 429);
+  await db.query("update attempts set at = now() - interval '61 seconds' where email = 'old@example.com'");
+  assert.equal((await book({ slot_id: "missing", email: "old@example.com" })).status, 404);
+});
+
+test("level 5: reads and cancels are not rate limited", async () => {
+  const a = await book({ email: "reader@example.com" });
+  for (let i = 0; i < 8; i++) assert.equal((await call("GET", "/bookings?email=reader@example.com")).status, 200);
+  assert.equal((await call("GET", `/bookings/${a.json.id}`)).status, 200);
+  assert.equal((await call("DELETE", `/bookings/${a.json.id}`)).status, 200);
 });
