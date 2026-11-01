@@ -52,7 +52,7 @@ export async function createDb(url?: string): Promise<Db> {
   let db: Db;
   if (url) {
     const { default: pg } = await import("pg");
-    const pool = new pg.Pool({ connectionString: url, max: 10 });
+    const pool = new pg.Pool({ connectionString: url, max: Number(process.env.PG_POOL_MAX) || 5 });
     db = {
       query: (text, params) => pool.query(text, params as unknown[]),
       async tx<T>(fn: (q: Query) => Promise<T>) {

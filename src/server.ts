@@ -14,5 +14,12 @@ if (!process.env.DATABASE_URL) {
 
 const db = await createDb(process.env.DATABASE_URL);
 
-const port = Number(process.env.PORT) || 3000;
-createApp({ db, apiKey }).listen(port, () => console.log(`Clinic booking API listening on :${port}`));
+const app = createApp({ db, apiKey });
+
+// On Vercel the platform calls the exported app itself; everywhere else we listen on a port.
+if (!process.env.VERCEL) {
+  const port = Number(process.env.PORT) || 3000;
+  app.listen(port, () => console.log(`Clinic booking API listening on :${port}`));
+}
+
+export default app;
