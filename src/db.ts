@@ -19,7 +19,24 @@ create table if not exists bookings (
   status     text not null,
   created_at timestamptz not null default now()
 );
+-- The double-booking guarantee: the database itself refuses a second confirmed booking for a slot,
+-- however many requests arrive at once. Cancelling flips status, which frees the slot again.
+create unique index if not exists one_confirmed_per_slot on bookings (slot_id) where status = 'confirmed';
 create index if not exists bookings_by_email on bookings (email, seq);
+-- Remembers the response to each Idempotency-Key so a retry gets the same answer, not a second booking.
+create table if not exists idempotency (
+  key          text primary key,
+  request_hash text not null,
+  status       int  not null,
+  body         text not null
+);
+-- One row per booking attempt, used to count attempts per email over the last minute.
+create table if not exists attempts (
+  id    bigserial primary key,
+  email text not null,
+  at    timestamptz not null default now()
+);
+create index if not exists attempts_by_email on attempts (email, at);
 `;
 
 export type Row = Record<string, any>;
@@ -35,7 +52,7 @@ export async function createDb(url?: string): Promise<Db> {
   let db: Db;
   if (url) {
     const { default: pg } = await import("pg");
-    const pool = new pg.Pool({ connectionString: url, max: 10 });
+    const pool = new pg.Pool({ connectionString: url, max: Number(process.env.PG_POOL_MAX) || 5 });
     db = {
       query: (text, params) => pool.query(text, params as unknown[]),
       async tx<T>(fn: (q: Query) => Promise<T>) {
