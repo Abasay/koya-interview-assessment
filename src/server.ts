@@ -1,4 +1,4 @@
-import { createApp } from './app.ts';
+import { createApp } from './create-app.ts';
 import { createDb } from './db.ts';
 import * as dotenv from 'dotenv';
 dotenv.config();

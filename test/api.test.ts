@@ -2,7 +2,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { createApp } from "../src/app.ts";
+import { createApp } from "../src/create-app.ts";
 import { createDb, type Db } from "../src/db.ts";
 
 const KEY = "test-key";
