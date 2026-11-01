@@ -329,3 +329,23 @@ test("level 5: reads and cancels are not rate limited", async () => {
   assert.equal((await call("GET", `/bookings/${a.json.id}`)).status, 200);
   assert.equal((await call("DELETE", `/bookings/${a.json.id}`)).status, 200);
 });
+
+test("booking ids are friendly, and lookups and cancels forgive case, spaces and dashes", async () => {
+  const b = await book();
+  assert.match(b.json.id, /^BK-[2-9A-HJKMNP-TV-Z]{4}-[2-9A-HJKMNP-TV-Z]{4}$/);
+  const messy = ` ${b.json.id.toLowerCase().replaceAll("-", "")} `;
+  const found = await call("GET", `/bookings/${encodeURIComponent(messy)}`);
+  assert.equal(found.status, 200);
+  assert.equal(found.json.id, b.json.id);
+  const del = await call("DELETE", `/bookings/${b.json.id.toLowerCase()}`);
+  assert.equal(del.json.status, "cancelled");
+  assert.equal(del.json.id, b.json.id);
+});
+
+test("booking ids are unique across bookings, and the id in the list matches the one returned", async () => {
+  const a = await book({ slot_id: "s1", email: "ids@example.com" });
+  const b = await book({ slot_id: "s2", email: "ids@example.com" });
+  assert.notEqual(a.json.id, b.json.id);
+  const list = await call("GET", "/bookings?email=ids@example.com");
+  assert.deepEqual(list.json.bookings.map((x: { id: string }) => x.id), [a.json.id, b.json.id]);
+});

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Db, Row } from './db.ts';
+import { newBookingId, normalizeBookingId } from './ids.ts';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -175,17 +176,28 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
       }
 
       // The unique index decides the winner when requests race: the loser's insert does nothing.
-      const { rows } = await q(
-        `insert into bookings (id, slot_id, name, email, status)
-         values ($1, $2, $3, $4, 'confirmed')
-         on conflict (slot_id) where status = 'confirmed' do nothing
-         returning id, slot_id, name, email, status, created_at`,
-        [crypto.randomUUID(), slotId, name, email],
-      );
-      if (!rows[0]) return { status: 409, body: { error: 'slot is already booked' } };
+      // A bare "do nothing" also swallows a (very unlikely) clash on the short booking id, so when
+      // nothing was inserted we check whether the slot is really taken, and if not, try a new id.
+      let booked: Row | undefined;
+      for (let attempt = 0; attempt < 5 && !booked; attempt++) {
+        booked = (
+          await q(
+            `insert into bookings (id, slot_id, name, email, status)
+             values ($1, $2, $3, $4, 'confirmed')
+             on conflict do nothing
+             returning id, slot_id, name, email, status, created_at`,
+            [newBookingId(), slotId, name, email],
+          )
+        ).rows[0];
+        if (!booked) {
+          const taken = await q("select 1 from bookings where slot_id = $1 and status = 'confirmed'", [slotId]);
+          if (taken.rows[0]) return { status: 409, body: { error: 'slot is already booked' } };
+        }
+      }
+      if (!booked) throw new Error('could not allocate a booking id');
 
       // Only successful bookings are remembered; a failed attempt is simply re-evaluated on retry.
-      const result = { status: 201, body: present(rows[0]) };
+      const result = { status: 201, body: present(booked) };
       if (idemKey) {
         await q('insert into idempotency (key, request_hash, status, body) values ($1,$2,$3,$4)', [
           idemKey,
@@ -234,7 +246,7 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
 
   api.get('/bookings/:id', async (req, res) => {
     const { rows } = await db.query('select id, slot_id, name, email, status, created_at from bookings where id = $1', [
-      req.params.id,
+      normalizeBookingId(req.params.id),
     ]);
     if (!rows[0]) return fail(res, 404, 'booking not found');
     res.json(present(rows[0]));
@@ -245,13 +257,13 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
     const out = await db.tx<Outcome>(async (q) => {
       const { rows } = await q(
         'select id, slot_id, name, email, status, created_at from bookings where id = $1 for update',
-        [req.params.id],
+        [normalizeBookingId(req.params.id)],
       );
       if (!rows[0]) return { status: 404, body: { error: 'booking not found' } };
       if (rows[0].status === 'cancelled') return { status: 409, body: { error: 'booking is already cancelled' } };
       const updated = await q(
         "update bookings set status = 'cancelled' where id = $1 returning id, slot_id, name, email, status, created_at",
-        [req.params.id],
+        [normalizeBookingId(req.params.id)],
       );
       return { status: 200, body: present(updated.rows[0]!) };
     });
