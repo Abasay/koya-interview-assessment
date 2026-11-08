@@ -30,36 +30,59 @@ const show = (el: HTMLElement, text: string, kind: "error" | "ok" = "error") => 
 };
 
 let slots: Slot[] = [];
+const known = new Map<string, Slot>(); // every slot seen so far, so old bookings can show their time
 let chosen: Slot | null = null;
 let current: Booking | null = null;
 let idemKey = "";
 
-async function loadSlots() {
+const PAGE_SIZE = 20;
+let slotCursor: string | null = null;
+
+// Slots come from the server one page at a time, already filtered by provider and date.
+async function loadSlots(more = false) {
+  const provider = $<HTMLSelectElement>("provider").value;
+  const date = $<HTMLInputElement>("date").value;
+  const query = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  if (provider) query.set("provider", provider);
+  if (date) query.set("date", date);
+  if (more && slotCursor) query.set("cursor", slotCursor);
   try {
-    slots = (await api<{ slots: Slot[] }>("GET", "/slots")).slots;
+    const page = await api<{ slots: Slot[]; next_cursor: string | null }>("GET", `/slots?${query}`);
+    slots = more ? [...slots, ...page.slots] : page.slots;
+    for (const s of page.slots) known.set(s.id, s);
+    slotCursor = page.next_cursor;
   } catch (e) {
     $("slots").textContent = (e as Error).message;
     return;
   }
-  const providers = [...new Set(slots.map((s) => s.provider))];
-  const sel = $<HTMLSelectElement>("provider");
-  const keep = sel.value;
-  sel.innerHTML = `<option value="">All</option>` + providers.map((p) => `<option>${esc(p)}</option>`).join("");
-  sel.value = providers.includes(keep) ? keep : "";
+  $("more-slots").hidden = !slotCursor;
+  $("clear-date").hidden = !date;
   renderSlots();
 }
 
+async function loadProviders() {
+  try {
+    const { providers } = await api<{ providers: string[] }>("GET", "/providers");
+    $<HTMLSelectElement>("provider").innerHTML =
+      `<option value="">All</option>` + providers.map((p) => `<option>${esc(p)}</option>`).join("");
+  } catch {
+    /* the filter just stays on "All" */
+  }
+}
+
 function renderSlots() {
-  const p = $<HTMLSelectElement>("provider").value;
   const now = Date.now();
-  const list = slots.filter((s) => (!p || s.provider === p) && new Date(s.start).getTime() > now);
+  const list = slots.filter((s) => new Date(s.start).getTime() > now);
   $("slots").innerHTML = list.length
     ? list.map((s) => `
     <div class="slot"><div><b>${esc(when(s.start))}</b><span>${esc(s.provider)} · until ${esc(timeOnly.format(new Date(s.end)))}</span></div>
     ${s.available ? `<button data-id="${esc(s.id)}">Book</button>` : `<span class="tag">Booked</span>`}</div>`).join("")
-    : "No upcoming slots.";
+    : "No upcoming slots for this selection.";
 }
-$("provider").onchange = renderSlots;
+$("provider").onchange = () => loadSlots();
+$("date").onchange = () => loadSlots();
+$("clear-date").onclick = () => { $<HTMLInputElement>("date").value = ""; loadSlots(); };
+$("more-slots").onclick = () => loadSlots(true);
 
 $("slots").onclick = (e) => {
   const id = (e.target as HTMLElement).dataset?.id;
@@ -98,7 +121,7 @@ $<HTMLFormElement>("book-form").onsubmit = async (e) => {
 };
 
 function detailsHtml(b: Booking) {
-  const slot = slots.find((s) => s.id === b.slot_id);
+  const slot = known.get(b.slot_id);
   return `<dt>Booking id</dt><dd>${esc(b.id)}</dd><dt>Status</dt><dd><span class="tag ${esc(b.status)}">${esc(b.status)}</span></dd>
     ${slot ? `<dt>When</dt><dd>${esc(when(slot.start))}</dd><dt>With</dt><dd>${esc(slot.provider)}</dd>` : `<dt>Slot</dt><dd>${esc(b.slot_id)}</dd>`}
     <dt>Name</dt><dd>${esc(b.name)}</dd><dt>Email</dt><dd>${esc(b.email)}</dd>`;
@@ -150,7 +173,7 @@ async function findBookings(more: boolean) {
     const r = await api<{ bookings: Booking[]; next_cursor: string | null }>(
       "GET", `/bookings?email=${encodeURIComponent(email)}&limit=5${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
     const rows = r.bookings.map((b) => {
-      const s = slots.find((x) => x.id === b.slot_id);
+      const s = known.get(b.slot_id);
       return `<div class="slot"><div><b>${s ? esc(when(s.start)) : esc(b.slot_id)}</b><span>${s ? esc(s.provider) + " · " : ""}${esc(b.id)}</span></div><span class="tag ${esc(b.status)}">${esc(b.status)}</span></div>`;
     }).join("");
     if (more) $("find-results").insertAdjacentHTML("beforeend", rows);
@@ -164,4 +187,5 @@ async function findBookings(more: boolean) {
 $("find-form").onsubmit = (e) => { e.preventDefault(); findBookings(false); };
 $("more").onclick = () => findBookings(true);
 
+loadProviders();
 loadSlots();

@@ -23,6 +23,26 @@ const RATE_LIMIT = 5;
 const RATE_WINDOW_SECONDS = 60;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// "2026-12-10" -> midnight UTC that day, or null if it isn't a real calendar date.
+function parseDay(value: unknown): Date | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const day = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== value ? null : day;
+}
+
+const encodeSlotCursor = (slot: Row) =>
+  Buffer.from(JSON.stringify([new Date(slot.start_at).toISOString(), slot.id])).toString('base64url');
+
+function decodeSlotCursor(value: unknown): { start: string; id: string } | null {
+  if (typeof value !== 'string') return null;
+  try {
+    const [start, id] = JSON.parse(Buffer.from(value, 'base64url').toString());
+    return typeof start === 'string' && typeof id === 'string' && !Number.isNaN(Date.parse(start)) ? { start, id } : null;
+  } catch {
+    return null;
+  }
+}
+
 interface Outcome {
   status: number;
   body: unknown;
@@ -87,23 +107,78 @@ export function createApp({ db, apiKey }: { db: Db; apiKey: string }) {
     res.json({ ok: true, slots: slots.length });
   });
 
-  // Every slot, earliest first. `available` is false while it has a confirmed booking.
+  // Earliest first. `available` is false while the slot has a confirmed booking.
+  // With no options this returns every slot, exactly as the contract says. Everything else is opt-in:
+  //   provider=Dr Ade           exact match
+  //   date=2026-12-10           one day (UTC); or from=… and/or to=… for a range, both inclusive
+  //   limit=20 [&cursor=…]      one page at a time (1-100); the last page has next_cursor: null
   api.get('/slots', async (req, res) => {
-    const { provider } = req.query;
-    const params: string[] = [];
-    let where = '';
-    if (typeof provider === 'string') {
-      params.push(provider);
-      where = 'where s.provider = $1';
+    const { provider, date, from, to, limit: rawLimit, cursor } = req.query;
+    const where: string[] = [];
+    const params: unknown[] = [];
+    const add = (value: unknown) => {
+      params.push(value);
+      return `$${params.length}`;
+    };
+
+    if (provider !== undefined) {
+      if (typeof provider !== 'string') return fail(res, 400, 'provider must be a string');
+      where.push(`s.provider = ${add(provider)}`);
     }
+
+    if (date !== undefined && (from !== undefined || to !== undefined)) {
+      return fail(res, 400, 'use either date, or from and/or to');
+    }
+    const first = date ?? from;
+    const last = date ?? to;
+    if (first !== undefined) {
+      const day = parseDay(first);
+      if (!day) return fail(res, 400, 'dates must look like 2026-12-10');
+      where.push(`s.start_at >= ${add(day.toISOString())}`);
+    }
+    if (last !== undefined) {
+      const day = parseDay(last);
+      if (!day) return fail(res, 400, 'dates must look like 2026-12-10');
+      where.push(`s.start_at < ${add(new Date(day.getTime() + 86_400_000).toISOString())}`);
+    }
+
+    const paged = rawLimit !== undefined || cursor !== undefined;
+    let limit = 0;
+    if (paged) {
+      limit = 20;
+      if (rawLimit !== undefined) {
+        if (typeof rawLimit !== 'string' || !/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100) {
+          return fail(res, 400, 'limit must be an integer from 1 to 100');
+        }
+        limit = Number(rawLimit);
+      }
+    }
+    if (cursor !== undefined) {
+      const after = decodeSlotCursor(cursor);
+      if (!after) return fail(res, 400, 'invalid cursor');
+      where.push(`(s.start_at, s.id) > (${add(after.start)}::timestamptz, ${add(after.id)})`);
+    }
+
+    // Keyset pagination on (start, id): stable when slots are booked or cancelled between pages.
+    // We ask for one extra row to know whether there is a next page.
     const { rows } = await db.query(
-      `select s.id, s.provider, s.start, s."end",
+      `select s.id, s.provider, s.start, s."end", s.start_at,
               not exists (select 1 from bookings b where b.slot_id = s.id and b.status = 'confirmed') as available
-         from slots s ${where}
-        order by s.start_at, s.id`,
+         from slots s ${where.length ? 'where ' + where.join(' and ') : ''}
+        order by s.start_at, s.id${paged ? ` limit ${limit + 1}` : ''}`,
       params,
     );
-    res.json({ slots: rows });
+    const page = paged ? rows.slice(0, limit) : rows;
+    const slots = page.map(({ start_at, ...slot }) => slot);
+    if (!paged) return res.json({ slots });
+    const next_cursor = rows.length > limit ? encodeSlotCursor(page[page.length - 1]!) : null;
+    res.json({ slots, next_cursor });
+  });
+
+  // The people-facing page needs the provider names for its filter without downloading every slot.
+  api.get('/providers', async (req, res) => {
+    const { rows } = await db.query('select distinct provider from slots order by provider');
+    res.json({ providers: rows.map((r) => r.provider) });
   });
 
   // Sliding window per email: at most 5 attempts in any 60 seconds, failed attempts included.
