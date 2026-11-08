@@ -12,7 +12,8 @@
     "dev": "node --watch src/server.ts",
     "test": "node --test",
     "typecheck": "tsc",
-    "build:web": "tsc -p tsconfig.web.json"
+    "build:web": "tsc -p tsconfig.web.json",
+    "seed": "node scripts/seed.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.13",

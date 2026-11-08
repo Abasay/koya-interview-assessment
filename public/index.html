@@ -52,9 +52,14 @@
   <section>
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">Available slots</h2>
-      <label style="margin:0">Provider <select id="provider"><option value="">All</option></select></label>
+      <div class="row">
+        <label style="margin:0">Provider <select id="provider"><option value="">All</option></select></label>
+        <label style="margin:0">Date <input id="date" type="date" style="width:auto"></label>
+        <button id="clear-date" class="ghost" hidden>Any date</button>
+      </div>
     </div>
     <div id="slots" aria-live="polite">Loading…</div>
+    <button id="more-slots" class="ghost" hidden style="margin-top:8px">Show more slots</button>
   </section>
 
   <section id="book-form-wrap" hidden>

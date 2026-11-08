@@ -349,3 +349,101 @@ test("booking ids are unique across bookings, and the id in the list matches the
   const list = await call("GET", "/bookings?email=ids@example.com");
   assert.deepEqual(list.json.bookings.map((x: { id: string }) => x.id), [a.json.id, b.json.id]);
 });
+
+async function manySlots() {
+  // 3 days x 2 providers x 3 times = 18 slots, ids n01..n18
+  const slots = [];
+  let n = 1;
+  for (let d = 1; d <= 3; d++) {
+    for (const provider of ["Dr Ade", "Dr Bola"]) {
+      for (const hour of [9, 10, 11]) {
+        slots.push({ id: `n${String(n++).padStart(2, "0")}`, provider, start: future(d, hour), end: future(d, hour + 1) });
+      }
+    }
+  }
+  assert.equal((await call("POST", "/reset", { body: { slots } })).status, 200);
+  return slots;
+}
+const ids = (r: { json: any }) => r.json.slots.map((s: { id: string }) => s.id);
+
+test("slots: with no options every slot comes back in one response, with no cursor", async () => {
+  await manySlots();
+  const all = await call("GET", "/slots");
+  assert.equal(all.json.slots.length, 18);
+  assert.equal("next_cursor" in all.json, false);
+  assert.equal("start_at" in all.json.slots[0], false);
+});
+
+test("slots: date filter returns only that UTC day", async () => {
+  await manySlots();
+  const day2 = await call("GET", `/slots?date=${future(2).slice(0, 10)}`);
+  assert.equal(day2.json.slots.length, 6);
+  assert.ok(day2.json.slots.every((s: { start: string }) => s.start.startsWith(future(2).slice(0, 10))));
+  assert.deepEqual((await call("GET", "/slots?date=2030-01-01")).json, { slots: [] });
+});
+
+test("slots: from and to are inclusive, and combine with provider", async () => {
+  await manySlots();
+  const range = await call("GET", `/slots?from=${future(2).slice(0, 10)}&to=${future(3).slice(0, 10)}`);
+  assert.equal(range.json.slots.length, 12);
+  const open = await call("GET", `/slots?from=${future(3).slice(0, 10)}`);
+  assert.equal(open.json.slots.length, 6);
+  const mix = await call("GET", `/slots?date=${future(1).slice(0, 10)}&provider=Dr%20Bola`);
+  assert.deepEqual(ids(mix), ["n04", "n05", "n06"]);
+});
+
+test("slots: pages walk the whole list in order with no gaps or repeats", async () => {
+  await manySlots();
+  const full = ids(await call("GET", "/slots"));
+  const seen: string[] = [];
+  let cursor: string | null = null;
+  let pages = 0;
+  do {
+    const r: Awaited<ReturnType<typeof call>> = await call("GET", `/slots?limit=5${cursor ? `&cursor=${cursor}` : ""}`);
+    assert.equal(r.status, 200);
+    assert.ok(r.json.slots.length <= 5);
+    seen.push(...ids(r));
+    cursor = r.json.next_cursor;
+    pages++;
+  } while (cursor);
+  assert.deepEqual(seen, full);
+  assert.equal(pages, 4);
+});
+
+test("slots: paging works together with filters, and an exact fit ends with a null cursor", async () => {
+  await manySlots();
+  const p1 = await call("GET", "/slots?provider=Dr%20Ade&limit=4");
+  assert.equal(p1.json.slots.length, 4);
+  assert.ok(p1.json.next_cursor);
+  const p2 = await call("GET", `/slots?provider=Dr%20Ade&limit=4&cursor=${p1.json.next_cursor}`);
+  assert.equal(p2.json.slots.length, 4);
+  assert.ok(p2.json.slots.every((s: { provider: string }) => s.provider === "Dr Ade"));
+  const p3 = await call("GET", `/slots?provider=Dr%20Ade&limit=4&cursor=${p2.json.next_cursor}`);
+  assert.equal(p3.json.slots.length, 1);
+  assert.equal(p3.json.next_cursor, null);
+  assert.equal((await call("GET", "/slots?provider=Dr%20Ade&limit=9")).json.next_cursor, null);
+});
+
+test("slots: booking a slot between pages doesn't shift the next page", async () => {
+  await manySlots();
+  const p1 = await call("GET", "/slots?limit=3");
+  const before = await call("GET", `/slots?limit=3&cursor=${p1.json.next_cursor}`);
+  const taken = p1.json.slots[0].id;
+  assert.equal((await call("POST", "/bookings", { body: { slot_id: taken, name: "Ada", email: "a@example.com" } })).status, 201);
+  const after = await call("GET", `/slots?limit=3&cursor=${p1.json.next_cursor}`);
+  assert.deepEqual(ids(after), ids(before));
+  assert.equal(after.json.slots.length, 3);
+});
+
+test("slots: bad limit, cursor or dates are 400, and the key is still required", async () => {
+  for (const q of ["limit=0", "limit=101", "limit=abc", "limit=1.5", "limit=", "cursor=abc", "cursor=", "date=2026-13-40", "date=tomorrow", "from=2026-1-1", "date=2030-01-01&from=2030-01-01"]) {
+    assert.equal((await call("GET", `/slots?${q}`)).status, 400, q);
+  }
+  assert.equal((await call("GET", "/slots?limit=5", { key: null })).status, 401);
+});
+
+test("providers: lists each provider once, sorted", async () => {
+  await manySlots();
+  assert.deepEqual((await call("GET", "/providers")).json, { providers: ["Dr Ade", "Dr Bola"] });
+  assert.equal((await call("GET", "/providers", { key: null })).status, 401);
+});
